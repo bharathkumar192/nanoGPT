@@ -9,6 +9,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from torchvision import datasets, transforms
+from PIL import Image
+
 
 class CombinedMNISTDataset(Dataset):
     """

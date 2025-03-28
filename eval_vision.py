@@ -13,7 +13,10 @@ from tqdm import tqdm
 from sklearn.metrics import confusion_matrix, classification_report
 import seaborn as sns
 
+# Import both model types
 from vision_model import VisionGPTConfig, VisionGPT
+from simple_vision_model import VisionGPTConfig as SimpleVisionGPTConfig
+from simple_vision_model import SimpleVisionGPT
 from data_utils import get_mnist_dataloaders
 
 # MNIST and FashionMNIST class names
@@ -27,7 +30,9 @@ CLASS_NAMES = [
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Evaluate a trained VisionGPT model')
-    parser.add_argument('--checkpoint', type=str, default='out-vision-mnist/ckpt.pt', help='Path to model checkpoint')
+    parser.add_argument('--checkpoint', type=str, default='out-vision-simple/ckpt.pt', help='Path to model checkpoint')
+    parser.add_argument('--model_type', type=str, default='auto', choices=['auto', 'simple', 'rope'], 
+                       help='Model type: auto (detect), simple (SimpleVisionGPT), or rope (VisionGPT)')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size for evaluation')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='Device to use')
     parser.add_argument('--visualize', action='store_true', help='Visualize model predictions')
@@ -35,7 +40,20 @@ def parse_args():
     parser.add_argument('--save_dir', type=str, default='./visualizations', help='Directory to save visualizations')
     return parser.parse_args()
 
-def load_model(checkpoint_path, device):
+def detect_model_type(checkpoint_path):
+    """Try to detect the model type from the checkpoint"""
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    state_dict = checkpoint['model']
+    
+    # Check for RoPE-specific parameters
+    has_rope = any('rope' in key for key in state_dict.keys())
+    
+    if has_rope:
+        return 'rope'
+    else:
+        return 'simple'
+
+def load_model(checkpoint_path, device, model_type='auto'):
     """Load model from checkpoint"""
     print(f"Loading checkpoint from {checkpoint_path}")
     
@@ -43,9 +61,19 @@ def load_model(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model_args = checkpoint['model_args']
     
+    # Detect model type if 'auto'
+    if model_type == 'auto':
+        model_type = detect_model_type(checkpoint_path)
+    
+    print(f"Using model type: {model_type}")
+    
     # Create model with same config
-    model_config = VisionGPTConfig(**model_args)
-    model = VisionGPT(model_config)
+    if model_type == 'rope':
+        model_config = VisionGPTConfig(**model_args)
+        model = VisionGPT(model_config)
+    else:  # 'simple'
+        model_config = SimpleVisionGPTConfig(**model_args)
+        model = SimpleVisionGPT(model_config)
     
     # Load state dict
     state_dict = checkpoint['model']
@@ -53,7 +81,28 @@ def load_model(checkpoint_path, device):
     for k, v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
+    
+    # Load model weights
+    try:
+        model.load_state_dict(state_dict)
+    except RuntimeError as e:
+        print(f"Error loading state dict: {e}")
+        print("Trying alternative model type...")
+        
+        # Try the other model type
+        if model_type == 'rope':
+            model_config = SimpleVisionGPTConfig(**model_args)
+            model = SimpleVisionGPT(model_config)
+        else:
+            model_config = VisionGPTConfig(**model_args)
+            model = VisionGPT(model_config)
+        
+        try:
+            model.load_state_dict(state_dict)
+            print("Successfully loaded with alternative model type.")
+        except RuntimeError as e2:
+            print(f"Failed with alternative model type as well: {e2}")
+            raise RuntimeError("Could not load model with either model type. Check the checkpoint.")
     
     # Move to device and set to eval mode
     model.to(device)
@@ -184,7 +233,7 @@ def main():
     val_loader = data['val']
     
     # Load model
-    model = load_model(args.checkpoint, device)
+    model = load_model(args.checkpoint, device, model_type=args.model_type)
     
     # Evaluate model
     all_preds, all_targets, avg_loss, accuracy = evaluate_model(model, val_loader, device)
